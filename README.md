@@ -1,5 +1,5 @@
 # tp6-comun-5-blasco-grupo-21
-Repositorio del **Trabajo Práctico N°2** para la materia **Electrónica Digital II** - UNC. 
+Repositorio del **Trabajo Práctico N°6** para la materia **Electrónica Digital II** - UNC. 
 
 Cada equipo implementa la actividad adaptando el diseño según las especificaciones y requerimientos dados por su docente de comisión.
 
@@ -26,10 +26,17 @@ permite visualizar los datos  en codificación ASCII en una pantalla.
 ---
 ## 💡 Conceptos Involucrados
 
-- **Registros de E/S y Puertos:** Configuración de `TRIS` y manipulación de `PORT`.
-- **Manejo de Tiempos:** Subrutinas de retardo por software.
-- **Lógica Digital y Algoritmos:** Manipulación de bits, desplazamientos.
-- **Estructuras de Control en Ensamblador:** Bucles, bifurcaciones y saltos condicionales.
+**Cronómetro (00.00 a 99.99 s):** Incrementa centésimas y segundos mediante interrupciones de tiempo (Timer0).
+**Multiplexado de Displays:** Muestra el tiempo en 4 displays de 7 segmentos cathode común usando PORTD (segmentos) y PORTC (activación de dígitos).
+
+**Controles Físicos:**
+**Botón RB0:** Inicia / Pausa el conteo (con antirrebote por software).
+**Botón RB1:** Reinicia el tiempo a 00.00.
+**Teclado Matricial (4×3 en PORTA/PORTB):** Permite ingresar un tiempo inicial cuando el cronómetro está pausado.
+
+**Comunicación PC (UART a 9600 baudios):**
+**TX (Envío):** Transmite el tiempo actual a la PC (SS.CC\r\n) cada vez que se pausa el cronómetro.
+**RX (Recepción):** Recibe dígitos numéricos en formato ASCII desde la PC para cargarlos en el cronómetro por desplazamiento a la izquierda.
 
 ---
 
