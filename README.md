@@ -35,7 +35,7 @@ permite visualizar los datos  en codificación ASCII en una pantalla.
 -**Teclado Matricial (4×3 en PORTA/PORTB):** Permite ingresar un tiempo inicial cuando el cronómetro está pausado.
 
 -**Comunicación PC (UART a 9600 baudios):**
--**TX (Envío):** Transmite el tiempo actual a la PC (SS.CC\r\n) cada vez que se pausa el cronómetro.
+-**TX (Envío):** Transmite el tiempo actual a la PC cada vez que se pausa el cronómetro.
 -**RX (Recepción):** Recibe dígitos numéricos en formato ASCII desde la PC para cargarlos en el cronómetro por desplazamiento a la izquierda.
 
 ---
