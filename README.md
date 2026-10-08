@@ -43,9 +43,8 @@ permite visualizar los datos  en codificación ASCII en una pantalla.
 ## 📐 Documentación Técnica
 
 ### 1. Diagrama de Bloques
-<img width="1600" height="532" alt="WhatsApp Image 2026-09-01 at 7 33 58 PM" src="https://github.com/user-attachments/assets/843e0dce-999e-48ca-be7e-1921b8c193c9" />
+<img width="482" height="210" alt="TP5 ED2-D  BLOQUES TP5" src="https://github.com/user-attachments/assets/e3e080ce-5931-4ba7-9e71-d0b65f4eebb9" />
 
 
 ### 1. Diagrama de Flujo
-<img width="1058" height="1600" alt="WhatsApp Image 2026-09-01 at 6 11 51 PM" src="https://github.com/user-attachments/assets/10522317-eda1-4c4e-945f-e33f44853686" />
 
