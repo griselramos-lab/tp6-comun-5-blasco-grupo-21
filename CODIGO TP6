@@ -1,0 +1,560 @@
+;============================================================
+; TP6 - Cronómetro Digital + Teclado Matricial + UART (9600 Baud)
+; PIC16F887 - Cristal 4 MHz
+; Displays: PORTD (Segmentos) y RC0-RC3 (Cátodos)
+; Teclado: RA0-RA3 (Filas), RB4-RB7 (Columnas)
+; Control: RB0 (Start/Stop), RB1 (Reset)
+; UART: RC6 (TX), RC7 (RX)
+;============================================================
+
+        LIST        P=16F887
+        #include    <P16F887.INC>
+
+        __CONFIG _CONFIG1, _HS_OSC & _WDT_OFF & _PWRTE_ON & _MCLRE_OFF & _CP_OFF & _CPD_OFF & _BOR_OFF & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
+        __CONFIG _CONFIG2, _BOR40V & _WRT_OFF
+
+;============================================================
+; VARIABLES (Banco 0)
+;============================================================
+        CBLOCK  0x20
+        CENT_UNI        ; SS.CC
+        CENT_DEC
+        SEG_UNI
+        SEG_DEC
+
+        ESTADO          ; Bit 0: 1=Run, 0=Stop
+        TICK10
+        DISPLAY_ACTUAL
+        DEBOUNCE
+
+        TECLA_PRES      ; Valor numérico 0..9 ingresado
+        TECLA_VAL       ; Flag de tecla válida (1=sí, 0=no)
+        FLAG_ENVIAR_UART; Flag para enviar por serie al pausar
+        ENDC
+
+; Variables de respaldo para ISR (Memoria compartida 0x70)
+        CBLOCK  0x70
+        W_TEMP
+        STATUS_TEMP
+        PCLATH_TEMP
+        ENDC
+
+;============================================================
+; VECTORES
+;============================================================
+        ORG     0x0000
+        GOTO    INICIO
+
+        ORG     0x0004
+        GOTO    ISR
+
+;============================================================
+; TABLA 7 SEGMENTOS - CÁTODO COMÚN (Página 0)
+;============================================================
+TABLA_7SEG
+        ANDLW   b'00001111'
+        ADDWF   PCL,F
+        RETLW   b'00111111'     ; 0
+        RETLW   b'00000110'     ; 1
+        RETLW   b'01011011'     ; 2
+        RETLW   b'01001111'     ; 3
+        RETLW   b'01100110'     ; 4
+        RETLW   b'01101101'     ; 5
+        RETLW   b'01111101'     ; 6
+        RETLW   b'00000111'     ; 7
+        RETLW   b'01111111'     ; 8
+        RETLW   b'01101111'     ; 9
+
+;============================================================
+; INICIALIZACIÓN
+;============================================================
+INICIO
+        ; 1. Desactivar analógicos
+        BANKSEL ANSEL
+        CLRF    ANSEL
+        CLRF    ANSELH
+
+        ; 2. Configurar Puertos
+        BANKSEL TRISD
+        CLRF    TRISD           ; RD0-RD7 Salidas (Displays)
+
+        BANKSEL TRISC
+        ; RC0-RC3 salidas (displays), RC6 salida (TX), RC7 entrada (RX)
+        MOVLW   b'10000000'
+        MOVWF   TRISC
+
+        BANKSEL TRISA
+        MOVLW   b'11110000'     ; RA0-RA3 Salidas (Filas teclado)
+        MOVWF   TRISA
+
+        BANKSEL TRISB
+        MOVLW   b'11110011'     ; RB0, RB1, RB4-RB7 Entradas
+        MOVWF   TRISB
+
+        ; 3. Pull-ups internas en PORTB
+        BANKSEL WPUB
+        MOVLW   b'11110011'
+        MOVWF   WPUB
+        BANKSEL IOCB
+        CLRF    IOCB
+
+        ; 4. OPTION_REG (TMR0 Prescaler 1:32, Pull-ups ON)
+        BANKSEL OPTION_REG
+        MOVLW   b'00000100'
+        MOVWF   OPTION_REG
+
+        ; 5. Inicializar Puertos
+        BANKSEL PORTD
+        CLRF    PORTD
+        CLRF    PORTC
+        MOVLW   b'00001111'
+        MOVWF   PORTA
+
+        ; 6. CONFIGURAR UART (9600 Baudios @ 4 MHz)
+        BANKSEL SPBRG
+        MOVLW   .25             ; SPBRG = 25 para 9600 baudios
+        MOVWF   SPBRG
+
+        BANKSEL TXSTA
+        MOVLW   b'00100100'     ; TXEN = 1 (Transmisión ON), BRGH = 1 (Alta velocidad)
+        MOVWF   TXSTA
+
+        BANKSEL RCSTA
+        MOVLW   b'10010000'     ; SPEN = 1 (Puerto Serie ON), CREN = 1 (Recepción continua ON)
+        MOVWF   RCSTA
+
+        ; 7. Precargas y Variables
+        BANKSEL TMR0
+        MOVLW   .100
+        MOVWF   TMR0
+
+        CLRF    CENT_UNI
+        CLRF    CENT_DEC
+        CLRF    SEG_UNI
+        CLRF    SEG_DEC
+        CLRF    ESTADO
+        CLRF    TICK10
+        CLRF    DISPLAY_ACTUAL
+        CLRF    DEBOUNCE
+        CLRF    FLAG_ENVIAR_UART
+
+        ; 8. Interrupciones (Timer0 y RB0)
+        BCF     INTCON, T0IF
+        BCF     INTCON, INTF
+        BSF     INTCON, T0IE
+        BSF     INTCON, INTE
+        BSF     INTCON, GIE
+
+;============================================================
+; BUCLE PRINCIPAL (MAIN)
+;============================================================
+MAIN
+        ; 1. ¿Toca enviar el tiempo congelado por UART al PC?
+        BANKSEL FLAG_ENVIAR_UART
+        MOVF    FLAG_ENVIAR_UART, F
+        BTFSC   STATUS, Z
+        GOTO    CHECK_RESET_BOTON
+
+        CALL    TRANSMITIR_TIEMPO_UART
+        BANKSEL FLAG_ENVIAR_UART
+        CLRF    FLAG_ENVIAR_UART
+
+CHECK_RESET_BOTON
+        ; 2. Botón de Reset físico (RB1)
+        BANKSEL PORTB
+        BTFSC   PORTB, 1
+        GOTO    CHECK_UART_RX
+
+        BANKSEL ESTADO
+        BTFSC   ESTADO, 0       ; Si corre, no resetear
+        GOTO    ESPERA_RESET
+
+        CLRF    CENT_UNI
+        CLRF    CENT_DEC
+        CLRF    SEG_UNI
+        CLRF    SEG_DEC
+        CLRF    TICK10
+
+ESPERA_RESET
+        BANKSEL PORTB
+        BTFSS   PORTB, 1
+        GOTO    ESPERA_RESET
+
+; --- RECEPCIÓN DESDE PC (PAD NUMÉRICO DE HÉRCULES) ---
+CHECK_UART_RX
+        BANKSEL PIR1
+        BTFSS   PIR1, RCIF      ; ¿Llegó algún byte por UART? (RCIF = 1)
+        GOTO    CHECK_TECLADO_FISICO
+
+        ; Si llegó un dato:
+        BANKSEL RCREG
+        MOVF    RCREG, W        ; Leer el byte recibido (limpia RCIF automáticamente)
+
+        ; Verificar si el cronómetro está detenido para permitir escritura
+        BANKSEL ESTADO
+        BTFSC   ESTADO, 0
+        GOTO    CHECK_TECLADO_FISICO ; Si corre, ignora el teclado de la PC
+
+        ; Validar que el byte recibido sea un dígito ASCII ('0' = 0x30 a '9' = 0x39)
+        ; Si W < 0x30 -> No es número
+        SUBLW   '9'             ; 0x39 - W
+        BTFSS   STATUS, C       ; Si C=0, W > '9' (no es número)
+        GOTO    CHECK_TECLADO_FISICO
+
+        BANKSEL RCREG
+        MOVF    RCREG, W        ; Recargar el byte original (está en memoria antes del shift)
+        ; Verificamos si W >= '0'
+        MOVWF   TECLA_PRES
+        MOVLW   '0'
+        SUBWF   TECLA_PRES, F   ; TECLA_PRES = ASCII - '0' (queda 0..9)
+        BTFSS   STATUS, C       ; Si C=0, era menor que '0'
+        GOTO    CHECK_TECLADO_FISICO
+
+        ; Es un dígito válido de PC: hacer desplazamiento hacia la izquierda
+        GOTO    APLICAR_SHIFT
+
+; --- ESCANEO TECLADO MATRICIAL FÍSICO ---
+CHECK_TECLADO_FISICO
+        BANKSEL ESTADO
+        BTFSC   ESTADO, 0       ; Solo si está detenido
+        GOTO    MAIN
+
+        CALL    ESCANEAR_TECLADO
+        MOVF    TECLA_VAL, W
+        BTFSC   STATUS, Z
+        GOTO    MAIN
+
+APLICAR_SHIFT
+        ; Desplazar dígitos hacia la izquierda:
+        MOVF    SEG_UNI, W
+        MOVWF   SEG_DEC
+        MOVF    CENT_DEC, W
+        MOVWF   SEG_UNI
+        MOVF    CENT_UNI, W
+        MOVWF   CENT_DEC
+        MOVF    TECLA_PRES, W
+        MOVWF   CENT_UNI
+
+ESPERAR_LIBERACION
+        CALL    LEER_COLUMNAS
+        XORLW   b'11110000'
+        BTFSS   STATUS, Z
+        GOTO    ESPERAR_LIBERACION
+
+        GOTO    MAIN
+
+;============================================================
+; TRANSMISIÓN UART: ENVÍA SS.CC\r\n AL PUERTO SERIE
+;============================================================
+TRANSMITIR_TIEMPO_UART
+        ; Enviar SEG_DEC en ASCII
+        BANKSEL SEG_DEC
+        MOVF    SEG_DEC, W
+        ADDLW   '0'
+        CALL    ENVIAR_BYTE_UART
+
+        ; Enviar SEG_UNI en ASCII
+        BANKSEL SEG_UNI
+        MOVF    SEG_UNI, W
+        ADDLW   '0'
+        CALL    ENVIAR_BYTE_UART
+
+        ; Enviar punto decimal '.'
+        MOVLW   '.'
+        CALL    ENVIAR_BYTE_UART
+
+        ; Enviar CENT_DEC en ASCII
+        BANKSEL CENT_DEC
+        MOVF    CENT_DEC, W
+        ADDLW   '0'
+        CALL    ENVIAR_BYTE_UART
+
+        ; Enviar CENT_UNI en ASCII
+        BANKSEL CENT_UNI
+        MOVF    CENT_UNI, W
+        ADDLW   '0'
+        CALL    ENVIAR_BYTE_UART
+
+        ; Enviar salto de línea (CR + LF)
+        MOVLW   0x0D            ; '\r'
+        CALL    ENVIAR_BYTE_UART
+        MOVLW   0x0A            ; '\n'
+        CALL    ENVIAR_BYTE_UART
+
+        RETURN
+
+ENVIAR_BYTE_UART
+        BANKSEL PIR1
+ESPERAR_TX_LIBRE
+        BTFSS   PIR1, TXIF      ; ¿Buffer de transmisión libre? (TXIF = 1)
+        GOTO    ESPERAR_TX_LIBRE
+        BANKSEL TXREG
+        MOVWF   TXREG           ; Enviar byte
+        RETURN
+
+;============================================================
+; RUTINAS DEL TECLADO MATRICIAL
+;============================================================
+LEER_COLUMNAS
+        BANKSEL PORTA
+        CLRF    PORTA
+        NOP
+        BANKSEL PORTB
+        MOVF    PORTB, W
+        ANDLW   b'11110000'
+        RETURN
+
+ESCANEAR_TECLADO
+        CLRF    TECLA_VAL
+
+        ; Fila 1 (RA0 = 0)
+        BANKSEL PORTA
+        MOVLW   b'00001110'
+        MOVWF   PORTA
+        NOP
+        BANKSEL PORTB
+        BTFSS   PORTB, 4
+        GOTO    K_1
+        BTFSS   PORTB, 5
+        GOTO    K_2
+        BTFSS   PORTB, 6
+        GOTO    K_3
+
+        ; Fila 2 (RA1 = 0)
+        BANKSEL PORTA
+        MOVLW   b'00001101'
+        MOVWF   PORTA
+        NOP
+        BANKSEL PORTB
+        BTFSS   PORTB, 4
+        GOTO    K_4
+        BTFSS   PORTB, 5
+        GOTO    K_5
+        BTFSS   PORTB, 6
+        GOTO    K_6
+
+        ; Fila 3 (RA2 = 0)
+        BANKSEL PORTA
+        MOVLW   b'00001011'
+        MOVWF   PORTA
+        NOP
+        BANKSEL PORTB
+        BTFSS   PORTB, 4
+        GOTO    K_7
+        BTFSS   PORTB, 5
+        GOTO    K_8
+        BTFSS   PORTB, 6
+        GOTO    K_9
+
+        ; Fila 4 (RA3 = 0)
+        BANKSEL PORTA
+        MOVLW   b'00000111'
+        MOVWF   PORTA
+        NOP
+        BANKSEL PORTB
+        BTFSS   PORTB, 5
+        GOTO    K_0
+        BTFSS   PORTB, 4
+        GOTO    TECLA_CLEAR
+
+        RETURN
+
+K_1     MOVLW   .1
+        GOTO    SET_TECLA
+K_2     MOVLW   .2
+        GOTO    SET_TECLA
+K_3     MOVLW   .3
+        GOTO    SET_TECLA
+K_4     MOVLW   .4
+        GOTO    SET_TECLA
+K_5     MOVLW   .5
+        GOTO    SET_TECLA
+K_6     MOVLW   .6
+        GOTO    SET_TECLA
+K_7     MOVLW   .7
+        GOTO    SET_TECLA
+K_8     MOVLW   .8
+        GOTO    SET_TECLA
+K_9     MOVLW   .9
+        GOTO    SET_TECLA
+K_0     MOVLW   .0
+        GOTO    SET_TECLA
+
+SET_TECLA
+        BANKSEL TECLA_PRES
+        MOVWF   TECLA_PRES
+        MOVLW   .1
+        MOVWF   TECLA_VAL
+        RETURN
+
+TECLA_CLEAR
+        BANKSEL CENT_UNI
+        CLRF    CENT_UNI
+        CLRF    CENT_DEC
+        CLRF    SEG_UNI
+        CLRF    SEG_DEC
+        RETURN
+
+;============================================================
+; ISR (Interrupción)
+;============================================================
+ISR
+        MOVWF   W_TEMP
+        SWAPF   STATUS, W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH, W
+        MOVWF   PCLATH_TEMP
+
+        CLRF    PCLATH
+        BCF     STATUS, RP0
+        BCF     STATUS, RP1
+
+        ; --- Interrupción Externa RB0 (Start / Stop) ---
+        BTFSS   INTCON, INTF
+        GOTO    CHECK_TMR0
+
+        BCF     INTCON, INTF
+        BCF     INTCON, INTE
+        MOVLW   .30
+        MOVWF   DEBOUNCE
+
+        ; Invertir Estado (1 <-> 0)
+        MOVLW   b'00000001'
+        XORWF   ESTADO, F
+
+        ; ¿Acabamos de pasar a STOP? (Si ESTADO,0 = 0 -> disparar envío UART)
+        BTFSS   ESTADO, 0
+        BSF     FLAG_ENVIAR_UART, 0
+
+CHECK_TMR0
+        BTFSS   INTCON, T0IF
+        GOTO    SALIR_ISR
+
+        BCF     INTCON, T0IF
+        MOVLW   .100
+        MOVWF   TMR0
+
+        ; Debounce
+        MOVF    DEBOUNCE, F
+        BTFSC   STATUS, Z
+        GOTO    PANTALLAS
+
+        DECFSZ  DEBOUNCE, F
+        GOTO    PANTALLAS
+
+        BCF     INTCON, INTF
+        BSF     INTCON, INTE
+
+; --- Multiplexado de Displays (5 ms por dígito) ---
+PANTALLAS
+        CLRF    PORTC
+        CLRF    PORTD
+
+        MOVF    DISPLAY_ACTUAL, W
+        XORLW   .0
+        BTFSC   STATUS, Z
+        GOTO    D1
+
+        MOVF    DISPLAY_ACTUAL, W
+        XORLW   .1
+        BTFSC   STATUS, Z
+        GOTO    D2
+
+        MOVF    DISPLAY_ACTUAL, W
+        XORLW   .2
+        BTFSC   STATUS, Z
+        GOTO    D3
+
+        GOTO    D4
+
+D1      MOVF    SEG_DEC, W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        MOVLW   b'00000001'
+        MOVWF   PORTC
+        GOTO    SIGUIENTE
+
+D2      MOVF    SEG_UNI, W
+        CALL    TABLA_7SEG
+        IORLW   b'10000000'     ; Punto decimal en unidades de segundo
+        MOVWF   PORTD
+        MOVLW   b'00000010'
+        MOVWF   PORTC
+        GOTO    SIGUIENTE
+
+D3      MOVF    CENT_DEC, W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        MOVLW   b'00000100'
+        MOVWF   PORTC
+        GOTO    SIGUIENTE
+
+D4      MOVF    CENT_UNI, W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        MOVLW   b'00001000'
+        MOVWF   PORTC
+
+SIGUIENTE
+        INCF    DISPLAY_ACTUAL, F
+        MOVF    DISPLAY_ACTUAL, W
+        XORLW   .4
+        BTFSS   STATUS, Z
+        GOTO    CRONO_TICK
+        CLRF    DISPLAY_ACTUAL
+
+; --- Conteo del Cronómetro (Cada 10 ms) ---
+CRONO_TICK
+        BTFSS   ESTADO, 0
+        GOTO    SALIR_ISR
+
+        INCF    TICK10, F
+        MOVF    TICK10, W
+        XORLW   .2
+        BTFSS   STATUS, Z
+        GOTO    SALIR_ISR
+
+        CLRF    TICK10
+
+        INCF    CENT_UNI, F
+        MOVF    CENT_UNI, W
+        XORLW   .10
+        BTFSS   STATUS, Z
+        GOTO    SALIR_ISR
+
+        CLRF    CENT_UNI
+        INCF    CENT_DEC, F
+        MOVF    CENT_DEC, W
+        XORLW   .10
+        BTFSS   STATUS, Z
+        GOTO    SALIR_ISR
+
+        CLRF    CENT_DEC
+        INCF    SEG_UNI, F
+        MOVF    SEG_UNI, W
+        XORLW   .10
+        BTFSS   STATUS, Z
+        GOTO    SALIR_ISR
+
+        CLRF    SEG_UNI
+        INCF    SEG_DEC, F
+        MOVF    SEG_DEC, W
+        XORLW   .10
+        BTFSS   STATUS, Z
+        GOTO    SALIR_ISR
+
+        CLRF    SEG_DEC
+        CLRF    SEG_UNI
+        CLRF    CENT_DEC
+        CLRF    CENT_UNI
+
+SALIR_ISR
+        MOVF    PCLATH_TEMP, W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP, W
+        MOVWF   STATUS
+        SWAPF   W_TEMP, F
+        SWAPF   W_TEMP, W
+        RETFIE
+
+        END
